@@ -4,8 +4,11 @@ import { FarmProfile } from '../../types';
 import { getCropDisplayName } from '../../data/farmCropCatalog';
 import {
   computeProfileCompleteness,
+  formatSoilMoistureUnit,
+  getMeasurementCaveats,
   getSoilMoistureProvenance,
   getSoilPhProvenance,
+  getWaterQualityState,
 } from '../../lib/farmStorage';
 
 interface FarmProfileDashboardProps {
@@ -24,6 +27,9 @@ export const FarmProfileDashboard: React.FC<FarmProfileDashboardProps> = ({
   const completeness = computeProfileCompleteness(profile);
   const moistureProv = getSoilMoistureProvenance(profile);
   const phProv = getSoilPhProvenance(profile);
+  const waterQualityState = getWaterQualityState(profile);
+  const measurementCaveats = getMeasurementCaveats(profile);
+  const moistureUnitLabel = formatSoilMoistureUnit(profile.soil.moistureUnit);
 
   const locationSummary =
     profile.location.locationLabel ||
@@ -57,11 +63,11 @@ export const FarmProfileDashboard: React.FC<FarmProfileDashboardProps> = ({
               {profile.location.farmName.trim() || 'Unnamed Farm'}
             </h2>
             <p className="text-xs text-[var(--text-secondary)]">
-              Data completeness:{' '}
+              Profile input completeness:{' '}
               <span className="font-mono font-semibold tabular-nums text-[var(--text-primary)]">
-                {completeness.overallPct}%
+                {completeness.overallPct}% ({completeness.answeredCount}/{completeness.totalChecks} fields)
               </span>{' '}
-              ({completeness.answeredCount} of {completeness.totalChecks} core items provided) · Unknown or untested items remain explicitly marked so conclusions are never fabricated.
+              — reflects questionnaire input coverage only, not scientific certainty, data quality, or measurement validity.
             </p>
           </div>
 
@@ -94,15 +100,29 @@ export const FarmProfileDashboard: React.FC<FarmProfileDashboardProps> = ({
         </div>
 
         {/* Missing / Unknown Information */}
-        {completeness.missingOrUnknown.length > 0 && (
-          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-4 space-y-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--score-caution)]">
-              <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span>Unknown or missing information ({completeness.missingOrUnknown.length})</span>
-            </div>
-            <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-              {completeness.missingOrUnknown.join(' · ')}
-            </p>
+        {(completeness.missingOrUnknown.length > 0 || measurementCaveats.length > 0) && (
+          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-4 space-y-2">
+            {completeness.missingOrUnknown.length > 0 && (
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--score-caution)]">
+                  <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>Unanswered or unknown questionnaire items ({completeness.missingOrUnknown.length})</span>
+                </div>
+                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                  {completeness.missingOrUnknown.join(' · ')}
+                </p>
+              </div>
+            )}
+            {measurementCaveats.length > 0 && (
+              <div className="space-y-1 pt-1 border-t border-[var(--border)] first:border-t-0 first:pt-0">
+                <div className="text-xs font-semibold text-[var(--text-primary)]">
+                  Measurement detail & result gaps ({measurementCaveats.length})
+                </div>
+                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                  {measurementCaveats.join(' · ')}
+                </p>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -190,7 +210,15 @@ export const FarmProfileDashboard: React.FC<FarmProfileDashboardProps> = ({
                 <dt className="text-[var(--text-secondary)]">Soil moisture</dt>
                 <dd className="font-medium text-[var(--text-primary)] font-mono tabular-nums">
                   {moistureProv !== 'Unknown' && profile.soil.moisturePct !== null
-                    ? `${profile.soil.moisturePct}% (${moistureProv}${profile.soil.moistureDate ? ` · ${profile.soil.moistureDate}` : ''})`
+                    ? `${profile.soil.moisturePct}% (${[
+                        moistureProv,
+                        moistureUnitLabel || 'unit unspecified',
+                        profile.soil.moistureMethod.trim() || 'method unspecified',
+                        profile.soil.moistureDepth?.trim() || 'depth unspecified',
+                        profile.soil.moistureDate || null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')})`
                     : 'Unknown / Not measured'}
                 </dd>
               </div>
@@ -262,7 +290,7 @@ export const FarmProfileDashboard: React.FC<FarmProfileDashboardProps> = ({
               <div>
                 <dt className="text-[var(--text-secondary)]">Water quality test</dt>
                 <dd className="font-medium text-[var(--text-primary)] font-mono tabular-nums">
-                  {profile.water.qualityTested === 'Yes'
+                  {waterQualityState === 'tested_with_results'
                     ? [
                         'Tested',
                         profile.water.ecValue !== null
@@ -274,7 +302,13 @@ export const FarmProfileDashboard: React.FC<FarmProfileDashboardProps> = ({
                       ]
                         .filter(Boolean)
                         .join(' · ')
-                    : profile.water.qualityTested || 'Unknown'}
+                    : waterQualityState === 'tested_results_missing'
+                      ? 'Tested — numeric results not entered'
+                      : waterQualityState === 'not_tested'
+                        ? 'Not tested (No)'
+                        : waterQualityState === 'unknown'
+                          ? 'Unknown'
+                          : 'Not answered'}
                 </dd>
               </div>
               <div>

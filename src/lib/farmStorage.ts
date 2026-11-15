@@ -1,4 +1,4 @@
-import { DataProvenanceTag, FarmProfile } from '../types';
+import { DataProvenanceTag, FarmProfile, SoilMoistureUnit } from '../types';
 
 const FARM_PROFILES_KEY = 'anchor_farm_profiles_v1';
 const ACTIVE_FARM_ID_KEY = 'anchor_active_farm_id_v1';
@@ -26,6 +26,8 @@ export function createEmptyFarmProfile(name = ''): FarmProfile {
       texture: '',
       moistureStatus: 'unknown',
       moisturePct: null,
+      moistureUnit: 'unspecified',
+      moistureDepth: '',
       moistureMethod: '',
       moistureDate: '',
       phStatus: 'not_tested',
@@ -299,6 +301,68 @@ export function getSoilMoistureProvenance(profile: FarmProfile): DataProvenanceT
 export function getSoilPhProvenance(profile: FarmProfile): DataProvenanceTag {
   if (profile.soil.phStatus === 'tested' && profile.soil.phValue !== null) return 'Measured';
   return 'Unknown';
+}
+
+export type WaterQualityState =
+  | 'tested_with_results'
+  | 'tested_results_missing'
+  | 'not_tested'
+  | 'unknown'
+  | 'unanswered';
+
+export function getWaterQualityState(profile: FarmProfile): WaterQualityState {
+  const qt = profile.water.qualityTested;
+  if (qt === 'Yes') {
+    const hasReadings =
+      profile.water.ecValue !== null || profile.water.salinityValue !== null;
+    return hasReadings ? 'tested_with_results' : 'tested_results_missing';
+  }
+  if (qt === 'No') return 'not_tested';
+  if (qt === 'Unknown') return 'unknown';
+  return 'unanswered';
+}
+
+export function formatSoilMoistureUnit(unit?: SoilMoistureUnit): string {
+  switch (unit) {
+    case 'volumetric_vwc':
+      return 'volumetric (% VWC)';
+    case 'gravimetric':
+      return 'gravimetric (% dry weight)';
+    case 'available_water_pct':
+      return '% available water capacity';
+    default:
+      return '';
+  }
+}
+
+export function getMeasurementCaveats(profile: FarmProfile): string[] {
+  const caveats: string[] = [];
+  if (profile.soil.moistureStatus !== 'unknown' && profile.soil.moisturePct !== null) {
+    const missingMoistureContext: string[] = [];
+    if (!profile.soil.moistureUnit || profile.soil.moistureUnit === 'unspecified') {
+      missingMoistureContext.push('unit/basis (e.g., % VWC vs. gravimetric)');
+    }
+    if (!profile.soil.moistureMethod.trim()) {
+      missingMoistureContext.push('measurement method');
+    }
+    if (!profile.soil.moistureDepth?.trim()) {
+      missingMoistureContext.push('sampling depth');
+    }
+    if (missingMoistureContext.length > 0) {
+      caveats.push(`Soil moisture (${profile.soil.moisturePct}%) missing: ${missingMoistureContext.join(', ')}`);
+    }
+  }
+  if (getWaterQualityState(profile) === 'tested_results_missing') {
+    caveats.push('Irrigation water marked tested ("Yes"), but EC and salinity results were not entered');
+  }
+  if (
+    profile.location.lat === null &&
+    profile.location.lon === null &&
+    (profile.location.locationLabel.trim() || profile.location.regionOrAddress.trim())
+  ) {
+    caveats.push('Location text entered without map coordinates (NASA POWER / EONET lookup skipped)');
+  }
+  return caveats;
 }
 
 export function exportFarmProfilesJson(profiles: FarmProfile[]): string {

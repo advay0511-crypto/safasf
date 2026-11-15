@@ -16,6 +16,12 @@ export type SoilTexture =
 
 export type SoilMoistureStatus = 'measured' | 'estimated' | 'unknown';
 
+export type SoilMoistureUnit =
+  | 'volumetric_vwc'
+  | 'gravimetric'
+  | 'available_water_pct'
+  | 'unspecified';
+
 export type SoilPhStatus = 'tested' | 'not_tested';
 
 export type DrainageRate =
@@ -159,6 +165,8 @@ export interface FarmSoilInfo {
   texture: SoilTexture | '';
   moistureStatus: SoilMoistureStatus;
   moisturePct: number | null;
+  moistureUnit?: SoilMoistureUnit;
+  moistureDepth?: string;
   moistureMethod: string;
   moistureDate: string;
   phStatus: SoilPhStatus;
@@ -243,6 +251,8 @@ export interface AgriculturalCropItem {
   preferredDrainage: string;
   preferredSeasons: GrowingSeasonOption[];
   fromCropsJson?: boolean;
+  referenceSource?: string;
+  referenceVerified?: boolean;
 }
 
 export type EvidenceBasis =
@@ -278,7 +288,18 @@ export interface FarmAnalysisReport {
   farmName: string;
   generatedAt: string;
   completenessPct: number;
+  completenessAnswered?: number;
+  completenessTotal?: number;
+  completenessByCategory?: {
+    farm: { pct: number; missing: string[] };
+    soil: { pct: number; missing: string[] };
+    water: { pct: number; missing: string[] };
+    crops: { pct: number; missing: string[] };
+    priorities: { pct: number; missing: string[] };
+    horizon: { pct: number; missing: string[] };
+  };
   missingDataSummary: string[];
+  measurementCaveats?: string[];
   externalDataStatus: {
     hasCoordinates: boolean;
     powerSummary: string | null;

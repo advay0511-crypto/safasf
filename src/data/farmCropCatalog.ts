@@ -162,6 +162,8 @@ const existingEntries: AgriculturalCropItem[] = (rawCrops as CropEntry[])
       preferredDrainage: meta.preferredDrainage,
       preferredSeasons: meta.preferredSeasons,
       fromCropsJson: true,
+      referenceSource: 'Anchor internal curated catalog (crops.json — unreferenced general range)',
+      referenceVerified: false,
     };
   });
 
@@ -552,7 +554,13 @@ const SUPPLEMENTAL_CROPS: AgriculturalCropItem[] = [
 
 export const AGRICULTURAL_CROP_CATALOG: AgriculturalCropItem[] = [
   ...existingEntries,
-  ...SUPPLEMENTAL_CROPS,
+  ...SUPPLEMENTAL_CROPS.map((item) => ({
+    ...item,
+    referenceSource:
+      item.referenceSource ??
+      'Anchor internal supplemental catalog (farmCropCatalog.ts — unreferenced general range)',
+    referenceVerified: item.referenceVerified ?? false,
+  })),
 ];
 
 export function findCropCatalogItem(idOrName: string): AgriculturalCropItem | undefined {

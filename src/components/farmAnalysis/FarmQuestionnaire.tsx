@@ -13,6 +13,7 @@ import {
   PlanningHorizon,
   RainfallFrequency,
   SoilMoistureStatus,
+  SoilMoistureUnit,
   SoilPhStatus,
   SoilPreparationMethod,
   SoilTexture,
@@ -578,6 +579,48 @@ export const FarmQuestionnaire: React.FC<FarmQuestionnaireProps> = ({
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label htmlFor="moisture-unit" className="block text-xs text-[var(--text-secondary)]">
+                          Moisture unit / basis (optional)
+                        </label>
+                        <select
+                          id="moisture-unit"
+                          value={profile.soil.moistureUnit ?? 'unspecified'}
+                          onChange={(e) =>
+                            onChange({
+                              ...profile,
+                              soil: {
+                                ...profile.soil,
+                                moistureUnit: e.target.value as SoilMoistureUnit,
+                              },
+                            })
+                          }
+                          className="w-full min-h-[42px] px-3 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] text-xs text-[var(--text-primary)]"
+                        >
+                          <option value="unspecified">Unspecified / Not sure</option>
+                          <option value="volumetric_vwc">Volumetric (% VWC)</option>
+                          <option value="gravimetric">Gravimetric (% dry weight)</option>
+                          <option value="available_water_pct">% Available water capacity</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label htmlFor="moisture-depth" className="block text-xs text-[var(--text-secondary)]">
+                          Sampling depth (optional)
+                        </label>
+                        <input
+                          id="moisture-depth"
+                          type="text"
+                          value={profile.soil.moistureDepth ?? ''}
+                          onChange={(e) =>
+                            onChange({
+                              ...profile,
+                              soil: { ...profile.soil, moistureDepth: e.target.value },
+                            })
+                          }
+                          placeholder="e.g. 0–15 cm, 15–30 cm"
+                          className="w-full min-h-[42px] px-3 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] text-xs text-[var(--text-primary)]"
+                        />
+                      </div>
                       <div className="space-y-1">
                         <label htmlFor="moisture-method" className="block text-xs text-[var(--text-secondary)]">
                           Measurement method (optional)

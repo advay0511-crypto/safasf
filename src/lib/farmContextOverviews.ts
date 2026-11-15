@@ -1,5 +1,6 @@
 import { findCropCatalogItem, getCropDisplayName } from '../data/farmCropCatalog';
 import { FarmProfile } from '../types';
+import { formatSoilMoistureUnit, getWaterQualityState } from './farmStorage';
 
 export interface ContextualOverview {
   title: string;
@@ -102,7 +103,7 @@ export function getSoilTextureOverview(profile: FarmProfile): ContextualOverview
 }
 
 export function getSoilMoistureOverview(profile: FarmProfile): ContextualOverview {
-  const { moistureStatus, moisturePct, moistureMethod } = profile.soil;
+  const { moistureStatus, moisturePct, moistureMethod, moistureUnit, moistureDepth, texture } = profile.soil;
   if (moistureStatus === 'unknown' || moisturePct === null) {
     return {
       title: 'Soil moisture unmeasured',
@@ -112,26 +113,36 @@ export function getSoilMoistureOverview(profile: FarmProfile): ContextualOvervie
   }
 
   const label = moistureStatus === 'measured' ? 'Measured' : 'Estimated';
-  const methodNote = moistureMethod.trim() ? ` (${moistureMethod.trim()})` : '';
+  const unitLabel = formatSoilMoistureUnit(moistureUnit);
+  const hasUnit = Boolean(unitLabel);
+  const hasMethod = Boolean(moistureMethod.trim());
+  const hasDepth = Boolean(moistureDepth?.trim());
+  const hasTexture = Boolean(texture && texture !== 'Unknown');
 
-  if (moisturePct < 25) {
+  const details: string[] = [];
+  if (hasUnit) details.push(unitLabel);
+  if (hasMethod) details.push(moistureMethod.trim());
+  if (hasDepth) details.push(`depth ${moistureDepth!.trim()}`);
+  const contextNote = details.length > 0 ? ` (${details.join(', ')})` : '';
+
+  const missing: string[] = [];
+  if (!hasUnit) missing.push('measurement unit/basis (% VWC vs. gravimetric vs. % available water)');
+  if (!hasMethod) missing.push('measurement method');
+  if (!hasDepth) missing.push('sampling depth');
+  if (!hasTexture) missing.push('soil texture');
+
+  if (missing.length > 0 || moistureStatus === 'estimated') {
     return {
-      title: `Low reported soil moisture (${moisturePct}%)`,
-      body: `The ${label.toLowerCase()} moisture value of ${moisturePct}%${methodNote} is relatively low. Whether irrigation is required depends on the crop, soil texture (clay holds water tightly at the same % compared with sand), measurement depth, and root-zone conditions.`,
-      provenanceNote: `${label} value · Requires crop & texture context`,
+      title: `Reported soil moisture: ${moisturePct}% — interpretation uncertain`,
+      body: `A ${label.toLowerCase()} reading of ${moisturePct}%${contextNote} cannot be reliably classified as dry, moderate, or wet without ${missing.length > 0 ? missing.join(', ') : 'instrument verification and soil water-retention curves'}. Different soil textures and measurement bases have very different field-capacity and wilting-point percentages.`,
+      provenanceNote: `${label} value · Interpretation uncertain without full measurement context`,
     };
   }
-  if (moisturePct <= 60) {
-    return {
-      title: `Moderate reported soil moisture (${moisturePct}%)`,
-      body: `A ${label.toLowerCase()} reading of ${moisturePct}%${methodNote} sits in a moderate range for many soils, though sandy soils near 60% may be near saturation while clay soils near 25–30% may still feel firm. Confirm in the active root zone.`,
-      provenanceNote: `${label} value · Interpret alongside soil texture`,
-    };
-  }
+
   return {
-    title: `High reported soil moisture (${moisturePct}%)`,
-    body: `High ${label.toLowerCase()} moisture (${moisturePct}%${methodNote}) may indicate wet conditions. Consider drainage speed and waterlogging risks before scheduling extra irrigation, and verify the reading at root depth.`,
-    provenanceNote: `${label} value · Verify drainage before irrigating`,
+    title: `Measured soil moisture: ${moisturePct}% (${unitLabel})`,
+    body: `Recorded ${moisturePct}% (${details.join(', ')}) on ${texture} soil. Anchor does not apply a universal dry/moderate/wet cutoff; compare this figure against your local soil water-retention curve (field capacity and permanent wilting point) and active crop rooting depth.`,
+    provenanceNote: `${label} value · Compare against soil-specific retention thresholds`,
   };
 }
 
@@ -140,36 +151,29 @@ export function getSoilPhOverview(profile: FarmProfile): ContextualOverview {
   if (phStatus === 'not_tested' || phValue === null) {
     return {
       title: 'Soil pH not tested',
-      body: 'Soil pH is currently untested. Many crops struggle when pH drifts too low or too high because key nutrients (like phosphorus, calcium, or iron) become chemically locked up. A soil test is needed before applying lime or sulfur.',
+      body: 'Soil pH is currently untested. In general soil chemistry, overly acidic or alkaline soil can reduce availability of nutrients such as phosphorus, calcium, or iron. A soil lab test (including buffer pH) is needed before applying lime or sulfur.',
       provenanceNote: 'Unknown · Laboratory or field test recommended',
     };
   }
 
-  if (phValue < 5.5) {
+  if (phValue < 5.8) {
     return {
-      title: `Strongly acidic soil (pH ${phValue.toFixed(1)})`,
-      body: `A tested pH of ${phValue.toFixed(1)} is strongly acidic. Acidic soils can reduce availability of nitrogen, phosphorus, calcium, and magnesium and slow legume nitrogen fixation. A soil lab test can confirm whether agricultural lime is appropriate.`,
-      provenanceNote: 'Farmer-reported test result · General pH interpretation',
+      title: `Acidic soil range (pH ${phValue.toFixed(1)})`,
+      body: `A tested pH of ${phValue.toFixed(1)} falls in the acidic range (< 5.8) under general soil-chemistry guidance, where availability of phosphorus, calcium, magnesium, and legume nodulation can decline. A soil lab buffer-pH test is needed before sizing agricultural lime.`,
+      provenanceNote: 'Farmer-reported test result · General soil-chemistry guidance (not crop-specific)',
     };
   }
-  if (phValue < 6.2) {
+  if (phValue <= 7.5) {
     return {
-      title: `Slightly acidic soil (pH ${phValue.toFixed(1)})`,
-      body: `A tested pH of ${phValue.toFixed(1)} is mildly acidic—well suited to potatoes, tea, and many berries, while some legumes and brassicas prefer closer to 6.5. Verify crop targets before amending.`,
-      provenanceNote: 'Farmer-reported test result · General pH interpretation',
-    };
-  }
-  if (phValue <= 7.3) {
-    return {
-      title: `Neutral soil range (pH ${phValue.toFixed(1)})`,
-      body: `A tested pH of ${phValue.toFixed(1)} falls in the neutral range where most macronutrients and micronutrients remain broadly available to cereals, legumes, and vegetables.`,
-      provenanceNote: 'Farmer-reported test result · General pH interpretation',
+      title: `Broadly favorable pH window (pH ${phValue.toFixed(1)})`,
+      body: `A tested pH of ${phValue.toFixed(1)} falls within the general 5.8–7.5 soil-chemistry window where macronutrients and micronutrients are broadly available for many crops, though individual crop species and cultivars still vary.`,
+      provenanceNote: 'Farmer-reported test result · General soil-chemistry guidance (not crop-specific)',
     };
   }
   return {
-    title: `Alkaline soil (pH ${phValue.toFixed(1)})`,
-    body: `A tested pH of ${phValue.toFixed(1)} is alkaline. Alkaline soils can limit availability of iron, zinc, manganese, and phosphorus. Organic matter additions and adapted crop choices can help manage micronutrient uptake.`,
-    provenanceNote: 'Farmer-reported test result · General pH interpretation',
+    title: `Alkaline soil range (pH ${phValue.toFixed(1)})`,
+    body: `A tested pH of ${phValue.toFixed(1)} falls in the alkaline range (> 7.5) under general soil-chemistry guidance, where iron, zinc, manganese, and phosphorus availability can decrease. Verify crop tolerance with local extension guidance before amending.`,
+    provenanceNote: 'Farmer-reported test result · General soil-chemistry guidance (not crop-specific)',
   };
 }
 
@@ -272,22 +276,35 @@ export function getWaterSourceAndAvailabilityOverview(profile: FarmProfile): Con
 }
 
 export function getWaterQualityOverview(profile: FarmProfile): ContextualOverview {
-  const { qualityTested, ecValue, ecUnit, salinityValue, salinityUnit } = profile.water;
-  if (!qualityTested || qualityTested === 'Unknown' || qualityTested === 'No') {
+  const { ecValue, ecUnit, salinityValue, salinityUnit } = profile.water;
+  const waterState = getWaterQualityState(profile);
+
+  if (waterState === 'not_tested') {
     return {
-      title: 'Irrigation water quality status',
-      body: qualityTested === 'No'
-        ? 'Water quality has not been tested. Unmeasured salinity or alkalinity can gradually accumulate in root zones under arid or frequent irrigation—especially with well or recycled water.'
-        : 'Testing irrigation water for electrical conductivity (EC) and salinity helps confirm whether salt-sensitive crops face leaf-burn or root uptake stress.',
-      provenanceNote: 'Untested / Unknown · No salinity levels assumed',
+      title: 'Irrigation water not tested',
+      body: 'You indicated irrigation water has not been tested. Unmeasured salinity, sodium, or alkalinity can gradually accumulate in root zones—especially with groundwater or recycled water.',
+      provenanceNote: 'Not tested · No salinity levels assumed',
     };
   }
-  const hasMetrics = ecValue !== null || salinityValue !== null;
-  if (!hasMetrics) {
+  if (waterState === 'unknown') {
     return {
-      title: 'Water tested — add values if available',
-      body: 'You indicated water has been tested. Entering the EC or salinity reading and test date allows Anchor to note potential salt sensitivity alongside your crops.',
-      provenanceNote: 'Reported tested · Numeric readings optional',
+      title: 'Water test status unknown',
+      body: 'You indicated water test status is Unknown. Without knowing whether testing occurred or what EC and salinity values are present, salt sensitivity risks cannot be verified.',
+      provenanceNote: 'Unknown · Testing status unconfirmed',
+    };
+  }
+  if (waterState === 'unanswered') {
+    return {
+      title: 'Irrigation water quality status',
+      body: 'Testing irrigation water for electrical conductivity (EC) and salinity helps confirm whether salt-sensitive crops face leaf-burn or root uptake stress.',
+      provenanceNote: 'Unanswered · Select Yes, No, or Unknown',
+    };
+  }
+  if (waterState === 'tested_results_missing') {
+    return {
+      title: 'Water tested — numeric results missing',
+      body: 'You indicated water has been tested, but EC and salinity readings were not entered. Entering the lab values and test date allows Anchor to flag potential salt sensitivity.',
+      provenanceNote: 'Tested (results missing) · Numeric readings needed',
     };
   }
   const readings: string[] = [];
@@ -295,8 +312,8 @@ export function getWaterQualityOverview(profile: FarmProfile): ContextualOvervie
   if (salinityValue !== null) readings.push(`Salinity ${salinityValue} ${salinityUnit}`);
   return {
     title: `Recorded water quality (${readings.join(' · ')})`,
-    body: 'Salinity tolerance varies significantly across crops (for example, beans and strawberries are much more salt-sensitive than barley or date palm). Compare these readings against target crop salinity guides.',
-    provenanceNote: 'Farmer-reported test values',
+    body: 'Salinity tolerance varies across crops. Compare these readings against local extension or crop-specific salinity guides.',
+    provenanceNote: 'Farmer-reported test values (with numeric readings)',
   };
 }
 

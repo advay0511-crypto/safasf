@@ -74,6 +74,7 @@ export interface PowerClimateResult {
   fetchedAt: string;
   meanMaxC: number | null;
   meanMinC: number | null;
+  meanTempC?: number | null;
   meanPrecipMm: number | null;
   meanWindMs: number | null;
   meanHumidityPct: number | null;

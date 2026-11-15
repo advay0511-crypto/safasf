@@ -60,9 +60,12 @@ export const FarmAnalysisReportView: React.FC<FarmAnalysisReportViewProps> = ({
               {report.farmName}
             </h2>
             <p className="text-xs text-[var(--text-secondary)]">
-              Completeness:{' '}
+              Profile input completeness:{' '}
               <span className="font-mono font-semibold tabular-nums text-[var(--text-primary)]">
                 {report.completenessPct}%
+                {report.completenessAnswered !== undefined && report.completenessTotal !== undefined
+                  ? ` (${report.completenessAnswered}/${report.completenessTotal} fields)`
+                  : ''}
               </span>{' '}
               · Restricted crops excluded:{' '}
               <span className="font-medium text-[var(--text-primary)]">
@@ -71,6 +74,19 @@ export const FarmAnalysisReportView: React.FC<FarmAnalysisReportViewProps> = ({
                   : 'None'}
               </span>
             </p>
+            <p className="text-[11px] text-[var(--text-secondary)]">
+              Completeness reflects questionnaire input coverage only — not scientific certainty, data quality, or lab measurement validity.
+            </p>
+            {report.completenessByCategory && (
+              <div className="flex flex-wrap gap-x-3 gap-y-1 pt-0.5 text-[11px] font-mono text-[var(--text-secondary)]">
+                <span>Farm {report.completenessByCategory.farm.pct}%</span>
+                <span>Soil {report.completenessByCategory.soil.pct}%</span>
+                <span>Water {report.completenessByCategory.water.pct}%</span>
+                <span>Crops {report.completenessByCategory.crops.pct}%</span>
+                <span>Priorities {report.completenessByCategory.priorities.pct}%</span>
+                <span>Horizon {report.completenessByCategory.horizon.pct}%</span>
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2 no-print">
@@ -144,6 +160,18 @@ export const FarmAnalysisReportView: React.FC<FarmAnalysisReportViewProps> = ({
             </p>
           </div>
         </div>
+
+        {(report.missingDataSummary.length > 0 || (report.measurementCaveats && report.measurementCaveats.length > 0)) && (
+          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3.5 space-y-1.5 text-xs">
+            <div className="flex items-center gap-1.5 font-semibold text-[var(--score-caution)]">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>Flagged data &amp; measurement gaps ({report.missingDataSummary.length})</span>
+            </div>
+            <p className="text-[var(--text-secondary)] leading-relaxed">
+              {report.missingDataSummary.join(' · ')}
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Gemini Plain-Language Explanation Card (Strictly Separated from Deterministic Math) */}

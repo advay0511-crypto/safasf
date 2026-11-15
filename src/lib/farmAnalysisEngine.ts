@@ -11,8 +11,11 @@ import {
 } from '../types';
 import {
   computeProfileCompleteness,
+  formatSoilMoistureUnit,
+  getMeasurementCaveats,
   getSoilMoistureProvenance,
   getSoilPhProvenance,
+  getWaterQualityState,
 } from './farmStorage';
 
 const INSUFFICIENT_MSG = 'Insufficient information for a reliable farm-specific recommendation.';
@@ -25,9 +28,76 @@ function hasChallenge(profile: FarmProfile, target: AgriculturalChallenge): bool
   return profile.planning.primaryChallenge === target || profile.planning.challenges.includes(target);
 }
 
+export interface PowerReferenceWindowInfo {
+  yearsLabel: string;
+  windowLabel: string;
+  sampleCount: number;
+}
+
+export function formatPowerReferenceWindow(power: PowerClimateResult): PowerReferenceWindowInfo {
+  const years = [...power.yearsAnalyzed].sort((a, b) => a - b);
+  const yearsLabel =
+    years.length > 1
+      ? `${years[0]}–${years[years.length - 1]} (${years.length} years)`
+      : years.length === 1
+        ? `${years[0]} (1 year)`
+        : 'unspecified years';
+
+  const startBase = new Date(`${power.targetDate}T00:00:00Z`);
+  const endBase = power.endDate ? new Date(`${power.endDate}T00:00:00Z`) : startBase;
+  let windowLabel = `${power.targetDate} (±3-day calendar window)`;
+  if (!Number.isNaN(startBase.getTime()) && !Number.isNaN(endBase.getTime())) {
+    const winStart = new Date(startBase);
+    winStart.setUTCDate(winStart.getUTCDate() - 3);
+    const winEnd = new Date(endBase);
+    winEnd.setUTCDate(winEnd.getUTCDate() + 3);
+    const fmt = (d: Date) =>
+      d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    windowLabel = `${fmt(winStart)}–${fmt(winEnd)} (centered on ${power.targetDate}, ±3 days)`;
+  }
+
+  return {
+    yearsLabel,
+    windowLabel,
+    sampleCount: power.windowDays.length,
+  };
+}
+
+function resolvePowerMeanTemp(power: PowerClimateResult): {
+  valueC: number;
+  isActualT2m: boolean;
+  label: string;
+} | null {
+  if (power.meanTempC !== null && power.meanTempC !== undefined) {
+    return {
+      valueC: power.meanTempC,
+      isActualT2m: true,
+      label: `NASA POWER daily mean temperature (T2M: ${power.meanTempC.toFixed(1)} °C)`,
+    };
+  }
+  if (power.meanMaxC !== null && power.meanMinC !== null) {
+    const est = (power.meanMaxC + power.meanMinC) / 2;
+    return {
+      valueC: est,
+      isActualT2m: false,
+      label: `estimated midpoint of NASA POWER mean daily high/low (${est.toFixed(1)} °C; direct T2M unavailable)`,
+    };
+  }
+  return null;
+}
+
 function buildClimateSummary(power: PowerClimateResult | null): string | null {
   if (!power) return null;
+  const win = formatPowerReferenceWindow(power);
   const parts: string[] = [];
+  const resolvedMean = resolvePowerMeanTemp(power);
+  if (resolvedMean) {
+    parts.push(
+      resolvedMean.isActualT2m
+        ? `daily mean ${resolvedMean.valueC.toFixed(1)} °C (T2M)`
+        : `estimated high/low midpoint ${resolvedMean.valueC.toFixed(1)} °C (T2M unavailable)`
+    );
+  }
   if (power.meanMaxC !== null && power.meanMinC !== null) {
     parts.push(`mean daily high ${power.meanMaxC.toFixed(1)} °C / low ${power.meanMinC.toFixed(1)} °C`);
   }
@@ -41,7 +111,7 @@ function buildClimateSummary(power: PowerClimateResult | null): string | null {
     parts.push(`solar irradiance ${power.meanSolarKwhM2.toFixed(1)} kWh/m²/day`);
   }
   return parts.length > 0
-    ? `NASA POWER (${power.yearsAnalyzed.length}-year climatology window): ${parts.join(', ')}.`
+    ? `NASA POWER (${win.yearsLabel}; 7-day calendar window ${win.windowLabel}, ${win.sampleCount} daily samples): ${parts.join(', ')}.`
     : null;
 }
 
@@ -118,24 +188,57 @@ export function generateDeterministicFarmAnalysis(
 
     if (moistureProv !== 'Unknown' && profile.soil.moisturePct !== null) {
       const pct = profile.soil.moisturePct;
+      const unitLabel = formatSoilMoistureUnit(profile.soil.moistureUnit);
+      const methodText = profile.soil.moistureMethod.trim();
+      const depthText = profile.soil.moistureDepth?.trim() || '';
+
+      const missingMoistureContext: string[] = [];
+      if (!unitLabel) missingMoistureContext.push('moisture unit/basis (e.g., % VWC, gravimetric %, or % available water)');
+      if (!methodText) missingMoistureContext.push('measurement method');
+      if (!depthText) missingMoistureContext.push('sampling depth');
+      if (!soilTextureKnown) missingMoistureContext.push('soil texture');
+      if (profile.soil.moistureStatus === 'estimated') {
+        missingMoistureContext.push('instrument-verified sensor or gravimetric reading');
+      }
+
+      const contextParts = [
+        unitLabel || null,
+        methodText ? `method: ${methodText}` : null,
+        depthText ? `depth: ${depthText}` : null,
+        profile.soil.moistureDate ? `date: ${profile.soil.moistureDate}` : null,
+      ].filter(Boolean);
+
+      const isUncertain =
+        missingMoistureContext.length > 0 || profile.soil.moistureStatus === 'estimated';
+
       soilItems.push({
-        title: `${moistureProv} soil moisture: ${pct}%`,
-        detail:
-          pct < 25
-            ? `Reported ${moistureProv.toLowerCase()} soil moisture (${pct}%) is relatively dry; whether immediate irrigation is warranted depends on crop rooting depth, soil texture, and measurement method.`
-            : pct > 60
-              ? `Reported ${moistureProv.toLowerCase()} soil moisture (${pct}%) indicates wet conditions; verify drainage before applying additional water.`
-              : `Reported ${moistureProv.toLowerCase()} soil moisture (${pct}%) sits in a moderate range; continue monitoring alongside crop stage and soil texture.`,
-        basis: 'Farmer-provided information',
-        whyGenerated: `Farmer recorded ${moistureProv.toLowerCase()} moisture of ${pct}%${profile.soil.moistureMethod ? ` via ${profile.soil.moistureMethod}` : ''}.`,
+        title: isUncertain
+          ? `${moistureProv} soil moisture: ${pct}% (interpretation uncertain)`
+          : `${moistureProv} soil moisture: ${pct}% (${unitLabel})`,
+        detail: isUncertain
+          ? `Reported ${moistureProv.toLowerCase()} soil moisture is ${pct}%${contextParts.length ? ` (${contextParts.join('; ')})` : ''}. Interpretation is uncertain: Anchor cannot classify ${pct}% as dry, moderate, or wet without knowing ${missingMoistureContext.join(', ')} and soil water-retention limits (field capacity / wilting point).`
+          : `Reported ${moistureProv.toLowerCase()} soil moisture is ${pct}% (${contextParts.join('; ')}) on ${profile.soil.texture} soil. Anchor does not apply a universal moisture threshold; evaluate ${pct}% against soil-specific field capacity, permanent wilting point, and active crop rooting depth.`,
+        basis: isUncertain ? 'Assumption requiring verification' : 'Farmer-provided information',
+        whyGenerated: `Farmer recorded ${moistureProv.toLowerCase()} soil moisture of ${pct}%${methodText ? ` via ${methodText}` : ''}${depthText ? ` at ${depthText}` : ''}.`,
         supportingFarmInfo: [
           `Soil moisture: ${pct}% (${moistureProv})`,
-          ...(profile.soil.moistureMethod ? [`Method: ${profile.soil.moistureMethod}`] : []),
+          ...(unitLabel ? [`Unit/basis: ${unitLabel}`] : ['Unit/basis: Not specified']),
+          ...(methodText ? [`Method: ${methodText}`] : ['Method: Not specified']),
+          ...(depthText ? [`Depth: ${depthText}`] : ['Depth: Not specified']),
           ...(profile.soil.moistureDate ? [`Date: ${profile.soil.moistureDate}`] : []),
         ],
-        supportingExternalData: power?.meanPrecipMm !== null && power?.meanPrecipMm !== undefined ? [`NASA POWER mean precip: ${power.meanPrecipMm.toFixed(2)} mm/day`] : [],
-        missingInfo: profile.soil.moistureStatus === 'estimated' ? ['Instrument-verified moisture reading at root depth'] : [],
-        furtherTestingNeeded: profile.soil.moistureStatus === 'estimated' ? 'Verify hand-estimated moisture with a tensiometer or gravimetric check.' : null,
+        supportingExternalData:
+          power?.meanPrecipMm !== null && power?.meanPrecipMm !== undefined
+            ? [`NASA POWER mean precip (${formatPowerReferenceWindow(power).windowLabel}): ${power.meanPrecipMm.toFixed(2)} mm/day`]
+            : [],
+        missingInfo: [
+          ...missingMoistureContext,
+          'Soil water-retention reference (field capacity & permanent wilting point for this field)',
+        ],
+        furtherTestingNeeded:
+          profile.soil.moistureStatus === 'estimated' || !methodText || !unitLabel || !depthText
+            ? 'Record measurement unit (% VWC vs. gravimetric), sampling depth (e.g., 0–15 cm), and instrument/gravimetric method before using moisture % to schedule irrigation.'
+            : 'Compare sensor/gravimetric % against soil-texture field capacity and wilting point at active root depth.',
       });
     } else {
       soilItems.push({
@@ -145,8 +248,8 @@ export function generateDeterministicFarmAnalysis(
         whyGenerated: 'Soil moisture was marked Unknown / Not measured.',
         supportingFarmInfo: ['Soil moisture: Unknown'],
         supportingExternalData: [],
-        missingInfo: ['Current root-zone soil moisture (%) and measurement method'],
-        furtherTestingNeeded: 'Inspect moisture 10–20 cm deep before planting or irrigating.',
+        missingInfo: ['Root-zone soil moisture (%), unit/basis, sampling depth, and measurement method'],
+        furtherTestingNeeded: 'Inspect moisture at active root depth (e.g., 0–15 cm) and record unit, depth, and method before planting or irrigating.',
       });
     }
 
@@ -156,12 +259,12 @@ export function generateDeterministicFarmAnalysis(
         title: `Tested soil pH: ${ph.toFixed(1)}`,
         detail:
           ph < 5.8
-            ? `Tested pH ${ph.toFixed(1)} is acidic, which can reduce availability of phosphorus, calcium, and legume nodulation; consult local extension lime recommendations if targeting neutral-preferring crops.`
+            ? `Tested pH ${ph.toFixed(1)} sits in the acidic range (< 5.8) under general soil-chemistry guidance, where availability of phosphorus, calcium, and legume nodulation can decline; consult local extension and a lab buffer-pH test before sizing lime.`
             : ph > 7.5
-              ? `Tested pH ${ph.toFixed(1)} is alkaline, which can limit iron, zinc, and phosphorus availability; organic matter and pH-tolerant varieties are useful considerations.`
-              : `Tested pH ${ph.toFixed(1)} sits in the broadly favorable 5.8–7.5 window for nutrient availability across most field crops.`,
+              ? `Tested pH ${ph.toFixed(1)} sits in the alkaline range (> 7.5) under general soil-chemistry guidance, where iron, zinc, and phosphorus availability can decrease; organic matter and adapted crop choices are useful considerations.`
+              : `Tested pH ${ph.toFixed(1)} sits in the general 5.8–7.5 soil-chemistry window where nutrient availability is broadly favorable across many field crops, though specific crop tolerances vary.`,
         basis: 'Farmer-provided information',
-        whyGenerated: `Farmer provided soil pH test result of ${ph.toFixed(1)}.`,
+        whyGenerated: `Farmer provided soil pH test result of ${ph.toFixed(1)}; interpreted with general soil-chemistry guidance.`,
         supportingFarmInfo: [
           `Soil pH: ${ph.toFixed(1)} (Tested)`,
           ...(profile.soil.phTestDate ? [`Test date: ${profile.soil.phTestDate}`] : []),
@@ -262,38 +365,74 @@ export function generateDeterministicFarmAnalysis(
       });
     }
 
-    if (profile.water.qualityTested === 'Yes') {
-      const hasReadings = profile.water.ecValue !== null || profile.water.salinityValue !== null;
+    const waterQualityState = getWaterQualityState(profile);
+    if (waterQualityState === 'tested_with_results') {
       waterItems.push({
-        title: 'Irrigation water quality',
-        detail: hasReadings
-          ? `Reported water test results — ${[
-              profile.water.ecValue !== null ? `EC: ${profile.water.ecValue} ${profile.water.ecUnit}` : null,
-              profile.water.salinityValue !== null ? `Salinity: ${profile.water.salinityValue} ${profile.water.salinityUnit}` : null,
-            ]
-              .filter(Boolean)
-              .join(', ')}. Compare salinity against specific crop thresholds before planting salt-sensitive vegetables or fruits.`
-          : 'Farmer reported that water has been tested, but numeric EC/salinity values were not entered.',
+        title: 'Irrigation water quality (tested with results)',
+        detail: `Reported water test results — ${[
+          profile.water.ecValue !== null ? `EC: ${profile.water.ecValue} ${profile.water.ecUnit}` : null,
+          profile.water.salinityValue !== null ? `Salinity: ${profile.water.salinityValue} ${profile.water.salinityUnit}` : null,
+        ]
+          .filter(Boolean)
+          .join(', ')}. Compare salinity against specific crop thresholds before planting salt-sensitive vegetables or fruits.`,
         basis: 'Farmer-provided information',
-        whyGenerated: 'Water quality test status was set to Yes.',
+        whyGenerated: 'Water quality test status was set to Yes with numeric EC/salinity readings.',
         supportingFarmInfo: [
-          `Water tested: Yes`,
+          'Water quality: Tested with numeric results',
+          ...(profile.water.ecValue !== null ? [`EC: ${profile.water.ecValue} ${profile.water.ecUnit}`] : []),
+          ...(profile.water.salinityValue !== null ? [`Salinity: ${profile.water.salinityValue} ${profile.water.salinityUnit}`] : []),
           ...(profile.water.qualityTestDate ? [`Test date: ${profile.water.qualityTestDate}`] : []),
         ],
         supportingExternalData: [],
-        missingInfo: hasReadings ? [] : ['Numeric EC (dS/m) and salinity values from the lab report'],
-        furtherTestingNeeded: hasReadings ? null : 'Enter EC / salinity readings from your water test report.',
+        missingInfo: [],
+        furtherTestingNeeded: null,
       });
-    } else {
+    } else if (waterQualityState === 'tested_results_missing') {
       waterItems.push({
-        title: 'Irrigation water quality unverified',
-        detail: 'Irrigation water quality has not been tested or is unknown. Potential salinity, sodium hazard, or pH effects on soil cannot be ruled out.',
+        title: 'Irrigation water tested — results missing',
+        detail: 'Farmer reported that irrigation water has been tested ("Yes"), but numeric EC and salinity values were not entered. Potential salinity, sodium hazard, or pH effects remain unverified until test values are recorded.',
         basis: 'Assumption requiring verification',
-        whyGenerated: 'Water quality testing was reported as No or Unknown.',
-        supportingFarmInfo: [`Quality tested: ${profile.water.qualityTested || 'Not answered'}`],
+        whyGenerated: 'Water quality test status was set to Yes, but EC and salinity fields were left blank.',
+        supportingFarmInfo: [
+          'Water quality: Tested (numeric results missing)',
+          ...(profile.water.qualityTestDate ? [`Test date: ${profile.water.qualityTestDate}`] : []),
+        ],
+        supportingExternalData: [],
+        missingInfo: ['Numeric EC (dS/m) and salinity/TDS values from the water lab report'],
+        furtherTestingNeeded: 'Enter EC / salinity readings from your water test report.',
+      });
+    } else if (waterQualityState === 'not_tested') {
+      waterItems.push({
+        title: 'Irrigation water not tested',
+        detail: 'Farmer reported that irrigation water has not been tested ("No"). Potential salinity, sodium hazard, or pH effects on soil and crops cannot be ruled out.',
+        basis: 'Assumption requiring verification',
+        whyGenerated: 'Water quality testing was explicitly reported as No.',
+        supportingFarmInfo: ['Water quality: Not tested (No)'],
         supportingExternalData: [],
         missingInfo: ['Electrical conductivity (EC), total dissolved solids / salinity, and water pH'],
         furtherTestingNeeded: 'Test irrigation water EC and pH once per season, especially if using groundwater or recycled water.',
+      });
+    } else if (waterQualityState === 'unknown') {
+      waterItems.push({
+        title: 'Irrigation water test status unknown',
+        detail: 'Water quality test status was reported as Unknown. Without knowing whether testing occurred or what EC/salinity values exist, salinity and alkalinity risks remain unverified.',
+        basis: 'Assumption requiring verification',
+        whyGenerated: 'Water quality testing was reported as Unknown.',
+        supportingFarmInfo: ['Water quality: Status unknown'],
+        supportingExternalData: [],
+        missingInfo: ['Confirmation of prior water testing and EC / salinity / pH values'],
+        furtherTestingNeeded: 'Confirm whether a water lab test exists or test EC and pH before planting salt-sensitive crops.',
+      });
+    } else {
+      waterItems.push({
+        title: 'Irrigation water test status unanswered',
+        detail: 'The irrigation water quality test question was not answered, so potential salinity, sodium hazard, or pH effects remain unverified.',
+        basis: 'Assumption requiring verification',
+        whyGenerated: 'Water quality testing question was left unanswered.',
+        supportingFarmInfo: ['Water quality: Not answered'],
+        supportingExternalData: [],
+        missingInfo: ['Water quality test status (Yes/No/Unknown) and EC / salinity values if tested'],
+        furtherTestingNeeded: 'Answer the water quality question in Stage 3 and test irrigation water EC and pH if untested.',
       });
     }
 
@@ -438,30 +577,51 @@ export function generateDeterministicFarmAnalysis(
 
       const observations: string[] = [];
       const gaps: string[] = [...missingSuitabilityDrivers];
+      const windowInfo = power ? formatPowerReferenceWindow(power) : null;
+      const resolvedMean = power ? resolvePowerMeanTemp(power) : null;
 
-      if (power && power.meanMaxC !== null && power.meanMinC !== null) {
-        const meanT = (power.meanMaxC + power.meanMinC) / 2;
+      if (resolvedMean && windowInfo) {
+        const meanT = resolvedMean.valueC;
+        const tempDesc = resolvedMean.isActualT2m
+          ? `NASA POWER daily mean temperature (T2M: ${meanT.toFixed(1)} °C)`
+          : `estimated midpoint of NASA POWER mean daily high/low (${meanT.toFixed(1)} °C; direct T2M unavailable)`;
         if (meanT < crop.tempMinC) {
-          observations.push(`NASA POWER climatology around this date averages ~${meanT.toFixed(1)} °C, cooler than ${crop.name}'s general ${crop.tempMinC}–${crop.tempMaxC} °C optimum.`);
+          observations.push(`For the 7-day reference window ${windowInfo.windowLabel} (${windowInfo.yearsLabel}), ${tempDesc} is cooler than ${crop.name}'s internal catalog temperature range (${crop.tempMinC}–${crop.tempMaxC} °C).`);
         } else if (meanT > crop.tempMaxC) {
-          observations.push(`NASA POWER climatology averages ~${meanT.toFixed(1)} °C, warmer than ${crop.name}'s general ${crop.tempMinC}–${crop.tempMaxC} °C optimum.`);
+          observations.push(`For the 7-day reference window ${windowInfo.windowLabel} (${windowInfo.yearsLabel}), ${tempDesc} is warmer than ${crop.name}'s internal catalog temperature range (${crop.tempMinC}–${crop.tempMaxC} °C).`);
         } else {
-          observations.push(`NASA POWER mean temperature (~${meanT.toFixed(1)} °C) aligns with ${crop.name}'s ${crop.tempMinC}–${crop.tempMaxC} °C range.`);
+          observations.push(`For the 7-day reference window ${windowInfo.windowLabel} (${windowInfo.yearsLabel}), ${tempDesc} falls within ${crop.name}'s internal catalog range (${crop.tempMinC}–${crop.tempMaxC} °C); this 7-day snapshot does not establish full-season suitability.`);
+        }
+      }
+
+      if (profile.planning.growingSeasons.length > 0) {
+        const selectedSeasons = profile.planning.growingSeasons;
+        const matchingSeasons = selectedSeasons.filter(
+          (s) => crop.preferredSeasons.includes(s) || s === 'Depends on the crop'
+        );
+        observations.push(
+          matchingSeasons.length > 0
+            ? `Anchor internal catalog season note lists ${crop.preferredSeasons.join(', ')} as typical growing seasons (general reference only, not NASA-verified seasonal suitability for ${selectedSeasons.join(', ')}).`
+            : `Anchor internal catalog lists typical seasons as ${crop.preferredSeasons.join(', ')}, which differs from your selected ${selectedSeasons.join(', ')} (general catalog reference only; full-season NASA climate data was not evaluated).`
+        );
+        if (power && windowInfo) {
+          gaps.push(`full-season NASA POWER climatology covering ${selectedSeasons.join(', ')} (current lookup covers only ${windowInfo.windowLabel})`);
         }
       }
 
       if (phProv === 'Measured' && profile.soil.phValue !== null) {
+        const refLabel = crop.referenceSource ?? 'Anchor internal catalog — unreferenced general range';
         if (profile.soil.phValue < crop.soilPhMin || profile.soil.phValue > crop.soilPhMax) {
-          observations.push(`Tested soil pH (${profile.soil.phValue.toFixed(1)}) sits outside ${crop.name}'s typical pH ${crop.soilPhMin}–${crop.soilPhMax} range.`);
+          observations.push(`Tested soil pH (${profile.soil.phValue.toFixed(1)}) sits outside Anchor's unverified internal catalog reference range for ${crop.name} (pH ${crop.soilPhMin}–${crop.soilPhMax}; source: ${refLabel}). Verify cultivar-specific pH tolerance with local agronomy/extension guides.`);
         } else {
-          observations.push(`Tested soil pH (${profile.soil.phValue.toFixed(1)}) aligns with ${crop.name}'s typical pH ${crop.soilPhMin}–${crop.soilPhMax}.`);
+          observations.push(`Tested soil pH (${profile.soil.phValue.toFixed(1)}) falls within Anchor's internal catalog reference range for ${crop.name} (pH ${crop.soilPhMin}–${crop.soilPhMax}; source: ${refLabel}), distinct from general soil-chemistry pH guidance.`);
         }
       }
 
       if (crop.waterNeed === 'High' && (profile.water.reliability === 'Frequently limited' || profile.water.reliability === 'Highly unreliable' || waterMethod === 'Rain-fed agriculture')) {
-        observations.push(`${crop.name} has high water demand, which poses risk given ${waterMethod || 'your farm'}'s limited or rain-dependent water supply.`);
+        observations.push(`${crop.name} is listed with high general water demand in Anchor's catalog, which poses risk given ${waterMethod || 'your farm'}'s limited or rain-dependent water supply.`);
       } else {
-        observations.push(`General water demand: ${crop.waterNeed}; preferred drainage: ${crop.preferredDrainage}.`);
+        observations.push(`Internal catalog traits: ${crop.waterNeed} water demand; preferred drainage: ${crop.preferredDrainage}.`);
       }
 
       suitItems.push({
@@ -470,15 +630,16 @@ export function generateDeterministicFarmAnalysis(
           gaps.length > 0 ? ` Note: missing ${gaps.join(', ')} prevents a conclusive farm-specific suitability verdict.` : ''
         }`,
         basis: power ? 'Existing Anchor environmental data' : 'General agricultural knowledge',
-        whyGenerated: `Checked ${crop.name} reference tolerances against available farm inputs${power ? ' and NASA POWER data' : ''}.`,
+        whyGenerated: `Checked ${crop.name} internal catalog tolerances (${crop.referenceSource ?? 'internal catalog'}) against available farm inputs${power && windowInfo ? ` and NASA POWER ${windowInfo.windowLabel} (${windowInfo.yearsLabel})` : ''}.`,
         supportingFarmInfo: [
           `Crop: ${crop.name} (${crop.botanicalFamily})`,
+          `Catalog provenance: ${crop.referenceSource ?? 'Anchor internal catalog (unreferenced)'}`,
           ...(phProv === 'Measured' && profile.soil.phValue !== null ? [`Tested pH: ${profile.soil.phValue.toFixed(1)}`] : []),
           ...(waterMethod ? [`Watering: ${waterMethod}`] : []),
         ],
         supportingExternalData: powerSummary ? [powerSummary] : [],
         missingInfo: gaps,
-        furtherTestingNeeded: phProv !== 'Measured' ? 'Verify topsoil pH before planting.' : null,
+        furtherTestingNeeded: phProv !== 'Measured' ? 'Verify topsoil pH and cultivar-specific local extension tolerances before planting.' : null,
       });
     }
   }
@@ -582,21 +743,33 @@ export function generateDeterministicFarmAnalysis(
       furtherTestingNeeded: null,
     });
   } else {
+    const windowInfo = power ? formatPowerReferenceWindow(power) : null;
+    const resolvedMean = power ? resolvePowerMeanTemp(power) : null;
+    const selectedSeasons = profile.planning.growingSeasons;
+    const seasonMissing: string[] = [];
+    if (!hasCoords) {
+      seasonMissing.push('Coordinates for NASA POWER seasonal baseline');
+    } else if (power && windowInfo) {
+      seasonMissing.push(
+        `Full-season NASA POWER monthly/seasonal climatology (frost frequency, temperature extremes, and seasonal rainfall totals) for ${selectedSeasons.length > 0 ? selectedSeasons.join(', ') : 'selected growing season(s)'}; current lookup covers only ${windowInfo.windowLabel}`
+      );
+    }
+
     seasonItems.push({
-      title: `Seasonal cadence (${profile.planning.growingSeasons.join(', ') || 'Seasons unspecified'})`,
+      title: `Seasonal cadence (${selectedSeasons.join(', ') || 'Seasons unspecified'})`,
       detail: `Planning horizon: ${profile.planning.horizon || 'Not specified'}; Annual cycles: ${profile.planning.annualCycles || 'Not specified'}. ${
-        power
-          ? `Regional NASA POWER history (${power.yearsAnalyzed.length} years) shows mean high ${power.meanMaxC?.toFixed(1) ?? '?'} °C, mean low ${power.meanMinC?.toFixed(1) ?? '?'} °C, and average daily rainfall ${power.meanPrecipMm?.toFixed(2) ?? '?'} mm/day around the reference window.`
-          : 'Add map coordinates to layer 20-year NASA POWER seasonal temperature and rainfall patterns onto these growing windows.'
+        power && windowInfo
+          ? `Available NASA POWER snapshot covers ${windowInfo.yearsLabel} strictly for the 7-day calendar window ${windowInfo.windowLabel} (${windowInfo.sampleCount} daily samples): ${resolvedMean ? `${resolvedMean.label}, ` : ''}mean high ${power.meanMaxC?.toFixed(1) ?? '?'} °C, mean low ${power.meanMinC?.toFixed(1) ?? '?'} °C, average rainfall ${power.meanPrecipMm?.toFixed(2) ?? '?'} mm/day. Limitation: a single 7-day reference window does not represent full-season or winter-long conditions and cannot verify ${selectedSeasons.length > 0 ? selectedSeasons.join('/') : 'seasonal'} suitability on its own.`
+          : 'Add map coordinates to retrieve NASA POWER historical climate data; note that the default lookup uses a 7-day target calendar window and full-season climate checks are still needed.'
       } ${
         eonet && eonet.nearbyEvents.length > 0
           ? `Note ${eonet.nearbyEvents.length} active NASA EONET hazard(s) within 300 km when planning field operations.`
           : ''
       }`.trim(),
       basis: power ? 'Existing Anchor environmental data' : 'Farmer-provided information',
-      whyGenerated: 'Synthesizes Stage 5 seasons/cycles/horizon with regional NASA POWER and EONET context where coordinates exist.',
+      whyGenerated: 'Synthesizes Stage 5 seasons/cycles/horizon with the exact NASA POWER 7-day reference window and states seasonal evidence limits.',
       supportingFarmInfo: [
-        `Seasons: ${profile.planning.growingSeasons.join(', ') || 'Not specified'}`,
+        `Seasons: ${selectedSeasons.join(', ') || 'Not specified'}`,
         `Annual cycles: ${profile.planning.annualCycles || 'Not specified'}`,
         `Horizon: ${profile.planning.horizon || 'Not specified'}`,
       ],
@@ -604,8 +777,11 @@ export function generateDeterministicFarmAnalysis(
         ...(powerSummary ? [powerSummary] : []),
         ...(eonetSummary ? [eonetSummary] : []),
       ],
-      missingInfo: !hasCoords ? ['Coordinates for NASA POWER seasonal baseline'] : [],
-      furtherTestingNeeded: null,
+      missingInfo: seasonMissing,
+      furtherTestingNeeded:
+        selectedSeasons.length > 0
+          ? `Review month-by-month frost dates, chill/heat accumulation, and seasonal rainfall totals for ${selectedSeasons.join(', ')} before finalizing planting dates.`
+          : null,
     });
   }
 
@@ -693,25 +869,64 @@ export function generateDeterministicFarmAnalysis(
     },
     {
       title: 'Evidence-based testing cadence',
-      detail: `Before applying major corrective amendments (lime, gypsum, sulfur, or high-rate N-P-K fertilisers), rely on periodic soil and water lab tests rather than guesswork. ${
-        phProv !== 'Measured' || profile.water.qualityTested !== 'Yes'
-          ? 'Currently, either soil pH or irrigation water quality remains untested.'
-          : 'Continue re-testing soil pH and water salinity every 1–3 seasons depending on cropping intensity.'
-      }`,
+      detail: (() => {
+        const wState = getWaterQualityState(profile);
+        const waterGapMsg =
+          wState === 'tested_results_missing'
+            ? 'irrigation water was marked tested without numeric EC/salinity results'
+            : wState === 'not_tested'
+              ? 'irrigation water has not been tested'
+              : wState === 'unknown'
+                ? 'irrigation water test status is unknown'
+                : wState === 'unanswered'
+                  ? 'irrigation water test status was not answered'
+                  : '';
+        const gaps = [
+          ...(phProv !== 'Measured' ? ['soil pH has not been tested'] : []),
+          ...(waterGapMsg ? [waterGapMsg] : []),
+        ];
+        return `Before applying major corrective amendments (lime, gypsum, sulfur, or high-rate N-P-K fertilisers), rely on periodic soil and water lab tests rather than guesswork. ${
+          gaps.length > 0
+            ? `Currently, ${gaps.join(' and ')}.`
+            : 'Continue re-testing soil pH and water salinity every 1–3 seasons depending on cropping intensity.'
+        }`;
+      })(),
       basis: 'Assumption requiring verification',
       whyGenerated: 'Highlights the boundary between general guidance and verified farm-specific lab evidence.',
       supportingFarmInfo: [
         `Soil pH status: ${phProv}`,
-        `Water quality tested: ${profile.water.qualityTested || 'Unknown'}`,
+        `Water quality status: ${(() => {
+          const s = getWaterQualityState(profile);
+          if (s === 'tested_with_results') return 'Tested (with numeric results)';
+          if (s === 'tested_results_missing') return 'Tested (results missing)';
+          if (s === 'not_tested') return 'Not tested (No)';
+          if (s === 'unknown') return 'Unknown';
+          return 'Not answered';
+        })()}`,
       ],
       supportingExternalData: [],
       missingInfo: [
         ...(phProv !== 'Measured' ? ['Soil pH & N-P-K lab report'] : []),
-        ...(profile.water.qualityTested !== 'Yes' ? ['Water EC & salinity test'] : []),
+        ...(getWaterQualityState(profile) !== 'tested_with_results'
+          ? [
+              getWaterQualityState(profile) === 'tested_results_missing'
+                ? 'Numeric water EC & salinity values from test report'
+                : 'Water EC & salinity test',
+            ]
+          : []),
       ],
       furtherTestingNeeded: 'Schedule a baseline soil fertility + pH test and seasonal water EC check.',
     },
   ];
+
+  const waterQualitySummaryText = (() => {
+    const s = getWaterQualityState(profile);
+    if (s === 'tested_with_results') return 'tested (with results)';
+    if (s === 'tested_results_missing') return 'tested (results missing)';
+    if (s === 'not_tested') return 'not tested';
+    if (s === 'unknown') return 'unknown';
+    return 'not answered';
+  })();
 
   // Prioritize order inside priorities-sensitive view
   const sections: FarmAnalysisSection[] = [
@@ -730,7 +945,7 @@ export function generateDeterministicFarmAnalysis(
       title: 'B. Water Availability and Irrigation Assessment',
       status: waterMethod && reliabilityKnown ? 'grounded' : waterMethod ? 'partial' : 'insufficient',
       summary: waterMethod
-        ? `Watering system: ${waterMethod}; reliability: ${profile.water.reliability || 'unknown'}; water quality tested: ${profile.water.qualityTested || 'unknown'}.`
+        ? `Watering system: ${waterMethod}; reliability: ${profile.water.reliability || 'unknown'}; water quality: ${waterQualitySummaryText}.`
         : 'Water source and watering system details are incomplete.',
       insufficientNotice: !waterMethod && profile.water.sources.length === 0 ? INSUFFICIENT_MSG : undefined,
       items: waterItems,
@@ -797,12 +1012,21 @@ export function generateDeterministicFarmAnalysis(
     },
   ];
 
+  const measurementCaveats = getMeasurementCaveats(profile);
+  const combinedMissingSummary = Array.from(
+    new Set([...completeness.missingOrUnknown, ...measurementCaveats])
+  );
+
   return {
     farmId: profile.id,
     farmName: profile.location.farmName.trim() || 'Unnamed Farm',
     generatedAt: new Date().toISOString(),
     completenessPct: completeness.overallPct,
-    missingDataSummary: completeness.missingOrUnknown,
+    completenessAnswered: completeness.answeredCount,
+    completenessTotal: completeness.totalChecks,
+    completenessByCategory: completeness.byCategory,
+    missingDataSummary: combinedMissingSummary,
+    measurementCaveats,
     externalDataStatus: {
       hasCoordinates: hasCoords,
       powerSummary,
